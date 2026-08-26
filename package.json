@@ -1,0 +1,28 @@
+{
+  "name": "awesome-artificial-intelligence",
+  "version": "0.1.0",
+  "description": "A collection of useful AI resources",
+  "license": "MIT",
+  "homepage": "https://github.com/owainlewis/awesome-artificial-intelligence",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:verbose": "vitest run --reporter=verbose",
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build": "tsc -p tsconfig.json",
+    "validate": "tsx scripts/validate_readme.ts",
+    "gen-tables": "node tools/gen_case_tables.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@vitest/coverage-v8": "^2.1.9",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.9"
+  }
+}

@@ -40,9 +40,9 @@ Descriptions must be specific, neutral, verifiable, and end with a period. Do no
 Before opening a pull request, run:
 
 ```bash
-python3 -m unittest discover -s tests -v
-python3 scripts/validate_readme.py README.md --base origin/master
-python3 scripts/validate_readme.py README.md --check-links --base origin/master
+npm test
+npx tsx scripts/validate_readme.ts README.md --base origin/master
+npx tsx scripts/validate_readme.ts README.md --check-links --base origin/master
 ```
 
 Complete the pull-request template. A maintainer may decline an entry that passes mechanical checks but fails the scope or quality policy.

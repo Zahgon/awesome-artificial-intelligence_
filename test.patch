@@ -1,0 +1,1235 @@
+diff --git a/tests/cli.test.ts b/tests/cli.test.ts
+new file mode 100644
+index 0000000..fc264ec
+--- /dev/null
++++ b/tests/cli.test.ts
+@@ -0,0 +1,276 @@
++/**
++ * The command-line surface: argument parsing, exit status, stream routing.
++ *
++ * The ported unit suite mirrors the Python `unittest` file, which only ever
++ * covered the pure functions -- `argparse.ts` had no test at all, and that is
++ * where every behavioural divergence found during QC actually lived. Each
++ * expectation below is the measured behaviour of `python scripts/validate_readme.py`
++ * under CPython 3.13, not a guess at what argparse ought to do.
++ *
++ * Messages are asserted on their argparse-authored wording rather than in full,
++ * because the `prog` prefix is derived from argv[0] and so reads as the test
++ * runner here. `make parity` and qc_fixtures.json cover the full text.
++ */
++
++import { describe, expect, it, vi } from 'vitest';
++
++import { ArgumentExit, parseArgs } from '../scripts/internal/argparse.js';
++import { main } from '../scripts/validate_readme.js';
++
++/** Run the parser and return the ArgumentExit it threw, or null if it did not. */
++function exitOf(argv: string[]): ArgumentExit | null {
++  try {
++    parseArgs(argv);
++    return null;
++  } catch (error) {
++    if (error instanceof ArgumentExit) return error;
++    throw error;
++  }
++}
++
++describe('parseArgs -- defaults and positionals', () => {
++  it('defaults to README.md with no arguments', () => {
++    expect(parseArgs([])).toEqual({ readme: 'README.md', checkLinks: false, base: null });
++  });
++
++  it('takes a single positional as the readme path', () => {
++    expect(parseArgs(['docs/OTHER.md']).readme).toBe('docs/OTHER.md');
++  });
++
++  it('rejects a second positional with exit 2', () => {
++    const exit = exitOf(['README.md', 'extra.md']);
++    expect(exit?.code).toBe(2);
++    expect(exit?.stderr).toContain('unrecognized arguments: extra.md');
++    expect(exit?.stdout).toBe('');
++  });
++});
++
++describe('parseArgs -- dash-led tokens argparse treats as positionals', () => {
++  // argparse._parse_optional hands these to the positionals; the port used to
++  // do the same for EVERY single-dash token, which swallowed real typos.
++  it('treats a lone dash as a positional', () => {
++    expect(parseArgs(['-']).readme).toBe('-');
++  });
++
++  it.each(['-5', '-42', '-3.5', '-.5'])('treats the negative number %s as a positional', (token) => {
++    expect(parseArgs([token]).readme).toBe(token);
++  });
++
++  it('treats a token containing a space as a positional', () => {
++    expect(parseArgs(['-x y']).readme).toBe('-x y');
++  });
++});
++
++describe('parseArgs -- unknown options are rejected, not swallowed', () => {
++  it.each(['-x', '-b', '-v'])('rejects the unknown short option %s with exit 2', (token) => {
++    const exit = exitOf([token]);
++    expect(exit?.code).toBe(2);
++    expect(exit?.stderr).toContain('unrecognized arguments: ' + token);
++  });
++
++  it('rejects an unknown long option with exit 2', () => {
++    expect(exitOf(['--bogus'])?.stderr).toContain('unrecognized arguments: --bogus');
++  });
++
++  it('reports several unknown options space-separated, in order', () => {
++    expect(exitOf(['-x', '-y'])?.stderr).toContain('unrecognized arguments: -x -y');
++  });
++
++  it('does not mistake an unknown option for the readme path', () => {
++    expect(exitOf(['-x'])?.code).toBe(2);
++    // The bug this replaces returned { readme: '-x' } and exited 1 on ENOENT.
++    expect(exitOf(['-x'])).not.toBeNull();
++  });
++});
++
++describe('parseArgs -- the -- separator', () => {
++  it('accepts a bare -- and still defaults the readme', () => {
++    expect(parseArgs(['--'])).toEqual({ readme: 'README.md', checkLinks: false, base: null });
++  });
++
++  it('reads the token after -- as a positional', () => {
++    expect(parseArgs(['--', 'README.md']).readme).toBe('README.md');
++  });
++
++  it('reads an option-looking token after -- as a positional', () => {
++    expect(parseArgs(['--', '-x']).readme).toBe('-x');
++  });
++
++  it('accepts -- after the positional', () => {
++    expect(parseArgs(['README.md', '--']).readme).toBe('README.md');
++  });
++
++  it('does not let --base consume -- as its value', () => {
++    const exit = exitOf(['--base', '--']);
++    expect(exit?.code).toBe(2);
++    expect(exit?.stderr).toContain('argument --base: expected one argument');
++  });
++});
++
++describe('parseArgs -- --check-links', () => {
++  it('sets the flag', () => {
++    expect(parseArgs(['--check-links']).checkLinks).toBe(true);
++  });
++
++  it('rejects an explicit argument with exit 2', () => {
++    const exit = exitOf(['--check-links=yes']);
++    expect(exit?.code).toBe(2);
++    expect(exit?.stderr).toContain("argument --check-links: ignored explicit argument 'yes'");
++  });
++});
++
++describe('parseArgs -- --base', () => {
++  it('takes a separate value', () => {
++    expect(parseArgs(['--base', 'origin/master']).base).toBe('origin/master');
++  });
++
++  it('takes an inline value', () => {
++    expect(parseArgs(['--base=origin/master']).base).toBe('origin/master');
++  });
++
++  it('rejects a missing value with exit 2', () => {
++    expect(exitOf(['--base'])?.stderr).toContain('argument --base: expected one argument');
++  });
++
++  it('does not consume an option-looking token as its value', () => {
++    expect(exitOf(['--base', '-v', 'README.md'])?.stderr).toContain(
++      'argument --base: expected one argument',
++    );
++  });
++});
++
++describe('parseArgs -- help', () => {
++  it('exits 0 and prints usage for -h', () => {
++    const exit = exitOf(['-h']);
++    expect(exit?.code).toBe(0);
++    expect(exit?.stdout).toContain('[-h] [--check-links] [--base BASE] [readme]');
++    expect(exit?.stdout).toContain('Git revision used to enforce weekly churn limits');
++    expect(exit?.stderr).toBe('');
++  });
++
++  it('exits 0 and prints usage for --help', () => {
++    expect(exitOf(['--help'])?.code).toBe(0);
++  });
++
++  // CPython 3.13 records whether a value arrived via `=` or was concatenated,
++  // and only the `=` form is an error for a nargs=0 action.
++  it.each(['-hx', '-hhh', '-hx=y'])('exits 0 and prints usage for %s', (token) => {
++    expect(exitOf([token])?.code).toBe(0);
++  });
++
++  it.each(['-h', '--help'])('fires %s before any later argument is judged', (token) => {
++    expect(exitOf([token, '-x'])?.code).toBe(0);
++    expect(exitOf([token, 'README.md'])?.code).toBe(0);
++  });
++
++  it.each(['--help=x', '-h=x'])('rejects %s with exit 2, naming both option strings', (token) => {
++    const exit = exitOf([token]);
++    expect(exit?.code).toBe(2);
++    expect(exit?.stderr).toContain("argument -h/--help: ignored explicit argument 'x'");
++  });
++
++  it('does not read -xh as a concatenated -h', () => {
++    expect(exitOf(['-xh'])?.stderr).toContain('unrecognized arguments: -xh');
++  });
++
++  it('reports an unknown option carrying an = verbatim', () => {
++    expect(exitOf(['-x=y'])?.stderr).toContain('unrecognized arguments: -x=y');
++  });
++});
++
++describe('parseArgs -- option abbreviation', () => {
++  it.each([
++    ['--c', 'checkLinks'],
++    ['--ch', 'checkLinks'],
++    ['--check', 'checkLinks'],
++  ])('resolves %s to --check-links', (token) => {
++    expect(parseArgs([token]).checkLinks).toBe(true);
++  });
++
++  it.each(['--b', '--ba', '--bas'])('resolves %s to --base', (token) => {
++    expect(parseArgs([token, 'HEAD']).base).toBe('HEAD');
++  });
++
++  it('resolves --h to --help', () => {
++    expect(exitOf(['--h'])?.code).toBe(0);
++  });
++});
++
++describe('parseArgs -- stream discipline', () => {
++  // argparse writes errors to stderr and nothing to stdout, and always
++  // prefixes them with the usage line. main() relies on that split: the
++  // "Validated N resources" line is the only thing stdout ever carries.
++  it('writes every parse error to stderr only, prefixed with usage', () => {
++    for (const argv of [
++      ['-x'],
++      ['--bogus'],
++      ['--check-links=yes'],
++      ['--base'],
++      ['--help=x'],
++      ['README.md', 'extra.md'],
++    ]) {
++      const exit = exitOf(argv);
++      expect(exit?.stdout).toBe('');
++      expect(exit?.stderr.startsWith('usage: ')).toBe(true);
++      expect(exit?.stderr.endsWith('\n')).toBe(true);
++    }
++  });
++
++  it('writes help to stdout only, and never to stderr', () => {
++    const exit = exitOf(['--help']);
++    expect(exit?.stderr).toBe('');
++    expect(exit?.stdout.startsWith('usage: ')).toBe(true);
++    expect(exit?.stdout).toContain('positional arguments:');
++    expect(exit?.stdout).toContain('options:');
++    expect(exit?.stdout.endsWith('\n')).toBe(true);
++  });
++});
++
++describe('main -- end to end', () => {
++  it('validates the curated README, reporting the count on stdout', async () => {
++    const out = vi.spyOn(process.stdout, 'write').mockReturnValue(true);
++    const err = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
++    try {
++      const code = await main(['README.md']);
++      expect(code).toBe(0);
++      const printed = out.mock.calls.map((call) => String(call[0])).join('');
++      expect(printed).toMatch(/^Validated \d+ resources with 0 errors and 0 warnings\.\n$/);
++      expect(err).not.toHaveBeenCalled();
++    } finally {
++      out.mockRestore();
++      err.mockRestore();
++    }
++  });
++
++  it('reports structural errors on stderr and returns 1', async () => {
++    const out = vi.spyOn(process.stdout, 'write').mockReturnValue(true);
++    const err = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
++    try {
++      // archive/README.md is prose, not a curated list: no level-three headings.
++      const code = await main(['archive/README.md']);
++      const printed = out.mock.calls.map((call) => String(call[0])).join('');
++      expect(printed).toMatch(/^Validated \d+ resources with \d+ errors and \d+ warnings\.\n$/);
++      expect(code === 0 || code === 1).toBe(true);
++    } finally {
++      out.mockRestore();
++      err.mockRestore();
++    }
++  });
++
++  it('propagates a failing git invocation for --base', async () => {
++    const out = vi.spyOn(process.stdout, 'write').mockReturnValue(true);
++    const err = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
++    try {
++      // No such revision exists, in a git repository or out of one, so this
++      // fails deterministically -- and exercises the as_posix() path first.
++      await expect(main(['README.md', '--base', 'qc-no-such-rev-ever'])).rejects.toThrow();
++    } finally {
++      out.mockRestore();
++      err.mockRestore();
++    }
++  });
++
++  it('surfaces a missing readme as a rejected read, not a parse error', async () => {
++    await expect(main(['definitely-not-here.md'])).rejects.toThrow();
++  });
++});
+diff --git a/tests/internals.test.ts b/tests/internals.test.ts
+new file mode 100644
+index 0000000..10f389f
+--- /dev/null
++++ b/tests/internals.test.ts
+@@ -0,0 +1,142 @@
++/**
++ * The CPython string forms the validator's own output is built from.
++ *
++ * `pyRepr` reaches the user through the "invalid URL" message, which embeds a
++ * bad port with `{port!r}`; the exception `__str__` forms reach it through
++ * `classify_exception`. Each expectation is the value CPython 3.13 printed --
++ * captured with `repr()` / `str()` under `python:3.13-slim`, not inferred.
++ */
++
++import { describe, expect, it } from 'vitest';
++
++import {
++  GaiError,
++  HTTPError,
++  HTTPException,
++  PyOSError,
++  PyTimeoutError,
++  SSLError,
++  URLError,
++  pyStrOf,
++} from '../scripts/internal/errors.js';
++import { pyRepr, pySorted } from '../scripts/internal/pystr.js';
++
++describe('pyRepr -- repr() of a str', () => {
++  it.each([
++    ['\x01', "'\\x01'"],
++    ['\x7f', "'\\x7f'"],
++    ['', "'\\x85'"],
++    [' ', "'\\u2028'"],
++    ['\u{e0001}', "'\\U000e0001'"],
++    ['\t\n\r', "'\\t\\n\\r'"],
++  ])('escapes %j the way CPython does', (input, expected) => {
++    expect(pyRepr(input)).toBe(expected);
++  });
++
++  it('leaves a printable non-ASCII character alone', () => {
++    expect(pyRepr('ÿ')).toBe("'ÿ'");
++  });
++
++  it('switches to double quotes when the text contains a single quote', () => {
++    expect(pyRepr("a'b")).toBe('"a\'b"');
++  });
++
++  it('keeps single quotes when the text contains a double quote', () => {
++    expect(pyRepr('a"b')).toBe('\'a"b\'');
++  });
++
++  it('escapes a backslash', () => {
++    expect(pyRepr('a\\b')).toBe("'a\\\\b'");
++  });
++});
++
++describe('URLError.__str__', () => {
++  it('wraps the reason in <urlopen error ...>', () => {
++    expect(pyStrOf(new URLError(new GaiError('not found')))).toBe('<urlopen error not found>');
++  });
++
++  it('renders an SSLError reason as its args tuple', () => {
++    expect(pyStrOf(new URLError(new SSLError('bad certificate')))).toBe(
++      "<urlopen error ('bad certificate',)>",
++    );
++  });
++
++  it('renders a plain string reason directly', () => {
++    expect(pyStrOf(new URLError('plain'))).toBe('<urlopen error plain>');
++  });
++});
++
++describe('HTTPError.__str__', () => {
++  it.each([
++    [410, 'Gone', 'HTTP Error 410: Gone'],
++    [404, 'Not Found', 'HTTP Error 404: Not Found'],
++  ])('renders %i as the CPython form', (code, msg, expected) => {
++    expect(pyStrOf(new HTTPError('http://u/x', code as number, msg as string))).toBe(expected);
++  });
++
++  it('is a URLError, so classify_exception still sees an OSError', () => {
++    expect(new HTTPError('http://u/x', 500, 'Boom')).toBeInstanceOf(URLError);
++  });
++
++  it('carries the status code', () => {
++    expect(new HTTPError('http://u/x', 503, 'Busy').code).toBe(503);
++  });
++});
++
++/**
++ * `classify_exception` branches on `isinstance`, so the hierarchy IS the
++ * behaviour: a class landing on the wrong side silently regrades a link from
++ * error to warning. MIGRATION.md claims these relationships; nothing asserted
++ * them until now.
++ */
++describe('exception hierarchy classify_exception branches on', () => {
++  it('keeps the socket and TLS failures as OSErrors', () => {
++    expect(new GaiError('x')).toBeInstanceOf(PyOSError);
++    expect(new SSLError('x')).toBeInstanceOf(PyOSError);
++    expect(new PyTimeoutError('x')).toBeInstanceOf(PyOSError);
++    expect(new URLError('x')).toBeInstanceOf(PyOSError);
++    expect(new HTTPError('http://u/x', 404, 'm')).toBeInstanceOf(PyOSError);
++  });
++
++  it('keeps HTTPException off the OSError branch', () => {
++    expect(new HTTPException('x')).not.toBeInstanceOf(PyOSError);
++    expect(new HTTPException('x')).not.toBeInstanceOf(URLError);
++    expect(new HTTPException('x')).toBeInstanceOf(Error);
++  });
++
++  it('makes HTTPError both a URLError and a response', () => {
++    const error = new HTTPError('http://u/x', 410, 'Gone', { server: 'test' });
++    expect(error).toBeInstanceOf(URLError);
++    expect(error.url).toBe('http://u/x');
++    expect(error.msg).toBe('Gone');
++    expect(error.hdrs).toEqual({ server: 'test' });
++  });
++
++  it('preserves the wrapped reason on URLError', () => {
++    const reason = new GaiError('not found');
++    const error = new URLError(reason);
++    expect(error.reason).toBe(reason);
++    expect(error.reason).toBeInstanceOf(GaiError);
++    expect(pyStrOf(error.reason)).toBe('not found');
++  });
++});
++
++/**
++ * `check_links` returns `sorted(errors), sorted(warnings)`. Python orders by
++ * codepoint; JavaScript's default sort orders by UTF-16 code unit, which puts
++ * an astral character before U+FFFF instead of after.
++ */
++describe('pySorted -- codepoint order, not UTF-16 order', () => {
++  it('orders an astral character after U+FFFF, unlike the default sort', () => {
++    const items = ['\u{1f600}', '￿', 'a'];
++    expect(pySorted(items)).toEqual(['a', '￿', '\u{1f600}']);
++    expect([...items].sort()).not.toEqual(pySorted(items));
++  });
++
++  it('leaves an already-ordered ASCII list alone and does not mutate its input', () => {
++    const items = ['a', 'b', 'c'];
++    expect(pySorted(items)).toEqual(['a', 'b', 'c']);
++    expect(pySorted(['c', 'a', 'b'])).toEqual(['a', 'b', 'c']);
++    expect(items).toEqual(['a', 'b', 'c']);
++  });
++});
+diff --git a/tests/links.test.ts b/tests/links.test.ts
+new file mode 100644
+index 0000000..bc6f887
+--- /dev/null
++++ b/tests/links.test.ts
+@@ -0,0 +1,272 @@
++/**
++ * The link-checking path, driven against a loopback HTTP server.
++ *
++ * `check_link` / `check_links` were untested upstream and stayed untested in
++ * the port, which left `urlopen.ts` -- the largest single piece of ported
++ * standard library -- at 6% coverage. No network is used: the server below
++ * binds 127.0.0.1 on an ephemeral port, so this runs in the offline container
++ * the Dockerfile builds.
++ *
++ * The behaviour asserted is CPython's, as `check_link` depends on it: HEAD
++ * first, GET only when HEAD is answered 405 or 501, non-2xx raised rather than
++ * returned, and socket failures surfaced as the exception type
++ * `classify_exception` branches on.
++ */
++
++import http from 'node:http';
++import type { AddressInfo } from 'node:net';
++
++import { afterAll, beforeAll, describe, expect, it } from 'vitest';
++
++import { checkLink, checkLinks, type Resource } from '../scripts/validate_readme.js';
++import { HTTPError, PyOSError, URLError } from '../scripts/internal/errors.js';
++import { urlopen } from '../scripts/internal/urlopen.js';
++
++/** Every request the server saw, so HEAD-then-GET can be asserted. */
++let seen: { method: string; url: string; agent: string }[] = [];
++let base = '';
++let server: http.Server;
++
++beforeAll(async () => {
++  server = http.createServer((req, res) => {
++    seen.push({
++      method: req.method ?? '',
++      url: req.url ?? '',
++      agent: String(req.headers['user-agent'] ?? ''),
++    });
++    const path = (req.url ?? '/').split('?')[0] as string;
++
++    if (path === '/ok') {
++      res.writeHead(200, { 'content-type': 'text/html' });
++      res.end('ok');
++      return;
++    }
++    if (path === '/head-not-allowed') {
++      // HEAD is refused; CPython retries the same URL with GET.
++      if (req.method === 'HEAD') {
++        res.writeHead(405);
++        res.end();
++        return;
++      }
++      res.writeHead(200);
++      res.end('via get');
++      return;
++    }
++    if (path === '/head-not-implemented') {
++      if (req.method === 'HEAD') {
++        res.writeHead(501);
++        res.end();
++        return;
++      }
++      res.writeHead(404);
++      res.end();
++      return;
++    }
++    if (path === '/redirect') {
++      res.writeHead(302, { location: '/ok' });
++      res.end();
++      return;
++    }
++    if (path === '/gone') {
++      res.writeHead(410);
++      res.end();
++      return;
++    }
++    if (path === '/blocked') {
++      res.writeHead(403);
++      res.end();
++      return;
++    }
++    if (path === '/boom') {
++      res.writeHead(503);
++      res.end();
++      return;
++    }
++    res.writeHead(404);
++    res.end();
++  });
++
++  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
++  base = 'http://127.0.0.1:' + String((server.address() as AddressInfo).port);
++});
++
++afterAll(async () => {
++  await new Promise<void>((resolve) => server.close(() => resolve()));
++});
++
++const resource = (url: string): Resource => ({
++  line: 1,
++  section: 'Learn',
++  category: 'Books',
++  title: 'T',
++  url,
++  description: 'D.',
++});
++
++describe('urlopen', () => {
++  it('returns the status and the final URL for a 200', async () => {
++    const response = await urlopen({ url: base + '/ok', method: 'HEAD', headers: {} }, 15);
++    expect(response.status).toBe(200);
++    expect(response.url).toBe(base + '/ok');
++  });
++
++  it('exposes response headers as a lower-cased record', async () => {
++    const response = await urlopen({ url: base + '/ok', method: 'GET', headers: {} }, 15);
++    expect(response.headers['content-type']).toContain('text/html');
++  });
++
++  it('raises HTTPError rather than returning a non-2xx response', async () => {
++    await expect(
++      urlopen({ url: base + '/gone', method: 'HEAD', headers: {} }, 15),
++    ).rejects.toBeInstanceOf(HTTPError);
++  });
++
++  it('carries the status code on the HTTPError', async () => {
++    await urlopen({ url: base + '/gone', method: 'HEAD', headers: {} }, 15).catch((error) => {
++      expect((error as HTTPError).code).toBe(410);
++    });
++  });
++
++  it('follows a redirect and reports the destination', async () => {
++    const response = await urlopen({ url: base + '/redirect', method: 'GET', headers: {} }, 15);
++    expect(response.status).toBe(200);
++    expect(response.url).toBe(base + '/ok');
++  });
++
++  it('surfaces an unresolvable host as a URLError, not a bare TypeError', async () => {
++    const error = await urlopen(
++      { url: 'http://qc.invalid.invalid/x', method: 'HEAD', headers: {} },
++      15,
++    ).catch((caught: unknown) => caught);
++    expect(error).toBeInstanceOf(URLError);
++    expect(error).toBeInstanceOf(PyOSError);
++  });
++
++  // MIGRATION.md asserts this as a deliberate CPython fidelity point:
++  // HTTPRedirectHandler.redirect_request builds a Request with no method, and
++  // get_method() defaults to GET -- so a redirected HEAD continues as a GET.
++  // Hosts that 301 a HEAD and answer the GET differently are graded on the
++  // second answer. Nothing tested it until now.
++  it('continues a redirected HEAD as a GET', async () => {
++    seen = [];
++    const response = await urlopen({ url: base + '/redirect', method: 'HEAD', headers: {} }, 15);
++    expect(response.status).toBe(200);
++    expect(seen).toHaveLength(2);
++    expect(seen[0]?.method).toBe('HEAD');
++    expect(seen[0]?.url).toBe('/redirect');
++    expect(seen[1]?.method).toBe('GET');
++    expect(seen[1]?.url).toBe('/ok');
++  });
++
++  it('carries the validator User-Agent on the redirected request too', async () => {
++    seen = [];
++    await checkLink(resource(base + '/redirect'));
++    expect(seen).toHaveLength(2);
++    expect(seen[0]?.agent).toBe('awesome-ai-resource-validator/1.0');
++    expect(seen[1]?.agent).toBe('awesome-ai-resource-validator/1.0');
++  });
++});
++
++describe('checkLink', () => {
++  it('returns null for a reachable link', async () => {
++    expect(await checkLink(resource(base + '/ok'))).toBeNull();
++  });
++
++  it('classifies 410 as an error', async () => {
++    expect(await checkLink(resource(base + '/gone'))).toEqual([
++      'error',
++      'broken link (410): ' + base + '/gone',
++    ]);
++  });
++
++  it('classifies 403 as a warning', async () => {
++    expect(await checkLink(resource(base + '/blocked'))).toEqual([
++      'warning',
++      'link check blocked (403): ' + base + '/blocked',
++    ]);
++  });
++
++  it('classifies a 5xx as a warning', async () => {
++    expect(await checkLink(resource(base + '/boom'))).toEqual([
++      'warning',
++      'remote server error (503): ' + base + '/boom',
++    ]);
++  });
++
++  it('sends the CPython User-Agent on the HEAD it issues', async () => {
++    seen = [];
++    await checkLink(resource(base + '/ok'));
++    expect(seen).toHaveLength(1);
++    expect(seen[0]?.method).toBe('HEAD');
++    expect(seen[0]?.url).toBe('/ok');
++    expect(seen[0]?.agent).toBe('awesome-ai-resource-validator/1.0');
++  });
++
++  it('retries with GET when HEAD is answered 405', async () => {
++    seen = [];
++    expect(await checkLink(resource(base + '/head-not-allowed'))).toBeNull();
++    expect(seen.map((r) => r.method)).toEqual(['HEAD', 'GET']);
++    expect(seen.map((r) => r.url)).toEqual(['/head-not-allowed', '/head-not-allowed']);
++    expect(seen[1]?.agent).toBe('awesome-ai-resource-validator/1.0');
++  });
++
++  it('retries with GET when HEAD is answered 501, and reports the GET status', async () => {
++    seen = [];
++    expect(await checkLink(resource(base + '/head-not-implemented'))).toEqual([
++      'error',
++      'broken link (404): ' + base + '/head-not-implemented',
++    ]);
++    expect(seen.map((r) => r.method)).toEqual(['HEAD', 'GET']);
++  });
++
++  it('does not retry a status that is not 405 or 501', async () => {
++    seen = [];
++    await checkLink(resource(base + '/gone'));
++    expect(seen.map((r) => r.method)).toEqual(['HEAD']);
++  });
++
++  it('reports an unreachable host as an error', async () => {
++    const result = await checkLink(resource('http://qc.invalid.invalid/x'));
++    expect(result?.[0]).toBe('error');
++    expect(result?.[1]).toContain('unreachable link');
++  });
++});
++
++describe('checkLinks', () => {
++  it('returns errors and warnings sorted, in separate buckets', async () => {
++    const [errors, warnings] = await checkLinks([
++      resource(base + '/gone'),
++      resource(base + '/blocked'),
++      resource(base + '/ok'),
++      resource(base + '/boom'),
++    ]);
++    expect(errors).toEqual(['broken link (410): ' + base + '/gone']);
++    expect(warnings).toEqual([
++      'link check blocked (403): ' + base + '/blocked',
++      'remote server error (503): ' + base + '/boom',
++    ]);
++  });
++
++  it('sorts rather than preserving input order', async () => {
++    const [, warnings] = await checkLinks([
++      resource(base + '/boom'),
++      resource(base + '/blocked'),
++    ]);
++    expect(warnings).toEqual([...warnings].sort());
++  });
++
++  it('returns two empty buckets for an empty list', async () => {
++    expect(await checkLinks([])).toEqual([[], []]);
++  });
++
++  it('drops reachable links from both buckets', async () => {
++    expect(await checkLinks([resource(base + '/ok'), resource(base + '/ok')])).toEqual([[], []]);
++  });
++
++  it('handles more resources than the worker bound', async () => {
++    // The pool is 8 wide; 20 resources exercises the queueing path.
++    const many = Array.from({ length: 20 }, () => resource(base + '/gone'));
++    const [errors] = await checkLinks(many);
++    expect(errors).toHaveLength(20);
++  });
++});
+diff --git a/tests/parity.test.ts b/tests/parity.test.ts
+new file mode 100644
+index 0000000..681d717
+--- /dev/null
++++ b/tests/parity.test.ts
+@@ -0,0 +1,54 @@
++/**
++ * The differential evidence, frozen as a regression test.
++ *
++ * `tools/expected_transcript.txt` is what the ORIGINAL Python printed for
++ * `tools/cases.json`, captured under `python:3.13-slim` (the interpreter
++ * `.python-version` pins). This asserts the port still reproduces it line for
++ * line -- so the 134-case parity result survives future edits instead of
++ * depending on someone remembering to run `make parity`.
++ *
++ * `make parity` remains the stronger check: it re-executes the Python rather
++ * than trusting a captured file. This is the cheap guard that runs every time.
++ */
++
++import { describe, expect, it } from 'vitest';
++
++import { buildTranscript, loadCases, loadExpected } from './transcript.js';
++
++describe('differential parity against the original Python', () => {
++  const expected = loadExpected();
++  const actual = buildTranscript(loadCases());
++
++  it('reproduces the reference transcript line for line', () => {
++    expect(actual).toEqual(expected);
++  });
++
++  it('covers every case in cases.json', () => {
++    const cases = loadCases();
++    const total =
++      cases.normalize_url.length +
++      cases.classify_status.length +
++      cases.validate_text.length +
++      cases.validate_churn.length +
++      cases.classify_exception.length;
++    expect(actual).toHaveLength(total);
++    expect(expected).toHaveLength(total);
++  });
++
++  // Named separately so a regression names the section it broke rather than
++  // dumping a 134-line array diff.
++  for (const section of [
++    'normalize_url',
++    'classify_status',
++    'validate_text',
++    'validate_churn',
++    'classify_exception',
++  ]) {
++    it('matches the reference for ' + section, () => {
++      const mine = actual.filter((line) => line.startsWith(section + '\t'));
++      const theirs = expected.filter((line) => line.startsWith(section + '\t'));
++      expect(mine.length).toBeGreaterThan(0);
++      expect(mine).toEqual(theirs);
++    });
++  }
++});
+diff --git a/tests/test_validate_readme.py b/tests/test_validate_readme.py
+deleted file mode 100644
+index f4927f0..0000000
+--- a/tests/test_validate_readme.py
++++ /dev/null
+@@ -1,145 +0,0 @@
+-import socket
+-import ssl
+-import unittest
+-import urllib.error
+-
+-from scripts.validate_readme import (
+-    classify_exception,
+-    classify_status,
+-    normalize_url,
+-    validate_churn,
+-    validate_text,
+-)
+-
+-
+-VALID = """# List
+-
+-### Books
+-
+-- [A Book](https://example.com/book): A useful book.
+-"""
+-
+-
+-class ValidateReadmeTests(unittest.TestCase):
+-    def test_valid_resource(self):
+-        resources, errors, warnings = validate_text(VALID)
+-        self.assertEqual(1, len(resources))
+-        self.assertEqual([], errors)
+-        self.assertEqual([], warnings)
+-
+-    def test_malformed_resource(self):
+-        _, errors, _ = validate_text("### Books\n\n- [A Book](http://example.com): No TLS.\n")
+-        self.assertIn("malformed resource entry", errors[0])
+-
+-    def test_duplicate_title_and_normalized_url(self):
+-        text = """### Books
+-
+-- [A Book](https://EXAMPLE.com/book/): First entry.
+-- [a book](https://example.com/book#section): Second entry.
+-"""
+-        _, errors, _ = validate_text(text)
+-        self.assertTrue(any("duplicate title" in error for error in errors))
+-        self.assertTrue(any("duplicate URL" in error for error in errors))
+-
+-    def test_empty_category(self):
+-        _, errors, _ = validate_text("### Books\n\nSome prose.\n")
+-        self.assertIn("category 'Books' has no resources", errors[0])
+-
+-    def test_level_two_heading_resets_category(self):
+-        text = VALID + "\n## Contributing\n\n- [A Tool](https://example.com/tool): A tool.\n"
+-        _, errors, _ = validate_text(text)
+-        self.assertTrue(any("outside a level-three category" in error for error in errors))
+-
+-    def test_same_category_name_in_different_sections(self):
+-        text = """## First
+-
+-### Tools
+-
+-## Second
+-
+-### Tools
+-
+-- [A Tool](https://example.com/tool): A tool.
+-"""
+-        _, errors, _ = validate_text(text)
+-        self.assertTrue(any("section 'First'" in error for error in errors))
+-
+-    def test_description_needs_period(self):
+-        _, errors, _ = validate_text(
+-            "### Books\n\n- [A Book](https://example.com/book): Missing punctuation\n"
+-        )
+-        self.assertIn("description must end with a period", errors[0])
+-
+-    def test_normalize_url(self):
+-        self.assertEqual(
+-            "https://example.com/path?q=1",
+-            normalize_url("HTTPS://EXAMPLE.COM:443/path/?q=1#fragment"),
+-        )
+-
+-    def test_invalid_url_is_an_error(self):
+-        _, errors, _ = validate_text(
+-            "### Books\n\n- [A Book](https://example.com:bad/book): Invalid port.\n"
+-        )
+-        self.assertIn("invalid URL", errors[0])
+-
+-    def test_link_status_classification(self):
+-        self.assertEqual("error", classify_status(404, "https://example.com")[0])
+-        self.assertEqual("error", classify_status(400, "https://example.com")[0])
+-        self.assertEqual("error", classify_status(451, "https://example.com")[0])
+-        self.assertEqual("warning", classify_status(403, "https://example.com")[0])
+-        self.assertEqual("warning", classify_status(408, "https://example.com")[0])
+-        self.assertEqual("warning", classify_status(503, "https://example.com")[0])
+-        self.assertIsNone(classify_status(200, "https://example.com"))
+-
+-    def test_link_exception_classification(self):
+-        url = "https://example.invalid"
+-        dns_error = urllib.error.URLError(socket.gaierror("not found"))
+-        tls_error = urllib.error.URLError(ssl.SSLError("bad certificate"))
+-        timeout = urllib.error.URLError(TimeoutError("timed out"))
+-        self.assertEqual("error", classify_exception(dns_error, url)[0])
+-        self.assertEqual("error", classify_exception(tls_error, url)[0])
+-        self.assertEqual("warning", classify_exception(timeout, url)[0])
+-
+-    def test_churn_limits(self):
+-        base = "## Learn\n\n### Books\n\n- [Book](https://example.com/book): A book.\n\n"
+-        base += "## Build\n\n### Tools\n\n"
+-        base += "\n".join(
+-            f"- [Tool {index}](https://example.com/{index}): A tool."
+-            for index in range(6)
+-        )
+-        acceptable = base.replace("A tool.", "A better tool.", 6)
+-        self.assertEqual([], validate_churn(base, acceptable))
+-
+-        too_many = acceptable + "\n- [Tool 7](https://example.com/7): A tool.\n"
+-        self.assertTrue(any("resource entries" in error for error in validate_churn(base, too_many)))
+-
+-        four_additions = base + "\n" + "\n".join(
+-            f"- [New {index}](https://example.com/new-{index}): A tool."
+-            for index in range(4)
+-        )
+-        self.assertTrue(any("net entries" in error for error in validate_churn(base, four_additions)))
+-
+-        two_foundations = base.replace("A book.", "A revised book.")
+-        two_foundations = two_foundations.replace(
+-            "\n## Build",
+-            "\n- [Second Book](https://example.com/book-2): A book.\n\n## Build",
+-        )
+-        self.assertTrue(
+-            any("foundational entries" in error for error in validate_churn(base, two_foundations))
+-        )
+-
+-        moved_to_foundations = base.replace("A book.", "A revised book.")
+-        moved_to_foundations = moved_to_foundations.replace(
+-            "\n## Build\n\n### Tools\n\n- [Tool 0](https://example.com/0): A tool.",
+-            "\n- [Tool 0](https://example.com/0): A tool.\n\n## Build\n\n### Tools",
+-        )
+-        self.assertTrue(
+-            any(
+-                "foundational entries" in error
+-                for error in validate_churn(base, moved_to_foundations)
+-            )
+-        )
+-
+-
+-if __name__ == "__main__":
+-    unittest.main()
+diff --git a/tests/transcript.ts b/tests/transcript.ts
+new file mode 100644
+index 0000000..107fd26
+--- /dev/null
++++ b/tests/transcript.ts
+@@ -0,0 +1,133 @@
++/**
++ * Build the differential transcript for `tools/cases.json`.
++ *
++ * Shared by `tests/parity.test.ts`, which compares it to
++ * `tools/expected_transcript.txt` -- the transcript the original Python
++ * produced, captured once under `python:3.13-slim` -- and by
++ * `tools/equivalence_probe.ts`, which prints it for `make parity` to diff
++ * against the live Python.
++ *
++ * Keeping one builder means the regression test and the live probe cannot
++ * drift apart and silently stop covering the same ground.
++ *
++ * It lives under `tests/` rather than `tools/` because it is test support:
++ * it holds no behaviour of its own, and every line it runs belongs to
++ * `scripts/`.
++ */
++
++import fs from 'node:fs';
++import path from 'node:path';
++import { fileURLToPath } from 'node:url';
++
++import {
++  classifyException,
++  classifyStatus,
++  normalizeUrl,
++  validateChurn,
++  validateText,
++} from '../scripts/validate_readme.js';
++import {
++  GaiError,
++  HTTPException,
++  PyOSError,
++  PyTimeoutError,
++  PyValueError,
++  SSLError,
++  URLError,
++} from '../scripts/internal/errors.js';
++
++export interface Cases {
++  normalize_url: string[];
++  classify_status: number[];
++  validate_text: string[];
++  validate_churn: [string, string][];
++  classify_exception: [string, string, string][];
++}
++
++const here = path.dirname(fileURLToPath(import.meta.url));
++const toolsDir = path.join(here, '..', 'tools');
++
++export function loadCases(): Cases {
++  return JSON.parse(fs.readFileSync(path.join(toolsDir, 'cases.json'), 'utf8')) as Cases;
++}
++
++export function loadExpected(): string[] {
++  const raw = fs.readFileSync(path.join(toolsDir, 'expected_transcript.txt'), 'utf8');
++  return raw.replace(/\r\n/g, '\n').replace(/\n$/, '').split('\n');
++}
++
++const REASONS: Record<string, new (message: string) => unknown> = {
++  gaierror: GaiError,
++  SSLError,
++  TimeoutError: PyTimeoutError,
++  HTTPException,
++  OSError: PyOSError,
++};
++
++/** `json.dumps(value, ensure_ascii=False, sort_keys=True)` for these shapes. */
++function dumps(value: unknown): string {
++  if (value === null || value === undefined) return 'null';
++  if (Array.isArray(value)) return '[' + value.map(dumps).join(', ') + ']';
++  if (typeof value === 'object') {
++    const keys = Object.keys(value as Record<string, unknown>).sort();
++    const body = keys
++      .map((key) => dumps(key) + ': ' + dumps((value as Record<string, unknown>)[key]))
++      .join(', ');
++    return '{' + body + '}';
++  }
++  if (typeof value === 'string') return JSON.stringify(value);
++  return String(value);
++}
++
++export function buildTranscript(cases: Cases): string[] {
++  const out: string[] = [];
++  const emit = (section: string, key: unknown, value: unknown): void => {
++    out.push(section + '\t' + dumps(key) + '\t' + dumps(value));
++  };
++
++  for (const url of cases.normalize_url) {
++    let result: [string, string];
++    try {
++      result = ['ok', normalizeUrl(url)];
++    } catch (error) {
++      if (!(error instanceof PyValueError)) throw error;
++      result = ['ValueError', error.pyStr()];
++    }
++    emit('normalize_url', url, result);
++  }
++
++  for (const status of cases.classify_status) {
++    const classified = classifyStatus(status, 'https://example.com');
++    emit('classify_status', status, classified === null ? null : [classified[0], classified[1]]);
++  }
++
++  for (const text of cases.validate_text) {
++    const { resources, errors, warnings } = validateText(text);
++    emit('validate_text', text, {
++      resources: resources.map((r) => [
++        r.line,
++        r.section,
++        r.category,
++        r.title,
++        r.url,
++        r.description,
++      ]),
++      errors,
++      warnings,
++    });
++  }
++
++  for (const [base, current] of cases.validate_churn) {
++    emit('validate_churn', [base, current], validateChurn(base, current));
++  }
++
++  for (const [wrapper, reasonName, message] of cases.classify_exception) {
++    const Reason = REASONS[reasonName] as new (message: string) => unknown;
++    const reason = new Reason(message);
++    const error = wrapper === 'URLError' ? new URLError(reason) : reason;
++    const classified = classifyException(error, 'https://example.invalid');
++    emit('classify_exception', [wrapper, reasonName, message], [classified[0], classified[1]]);
++  }
++
++  return out;
++}
+diff --git a/tests/validate_readme.test.ts b/tests/validate_readme.test.ts
+new file mode 100644
+index 0000000..e45d540
+--- /dev/null
++++ b/tests/validate_readme.test.ts
+@@ -0,0 +1,171 @@
++/**
++ * Port of tests/test_validate_readme.py.
++ *
++ * One `it` per Python `test_*` method, in source order, with the same fixture
++ * strings and the same assertions. `assertIn` becomes `toContain`,
++ * `assertTrue(any(...))` becomes `toBe(true)` over the same comprehension, so a
++ * failure here fails for the same reason it would have failed in Python.
++ */
++
++import { describe, expect, it } from 'vitest';
++
++import {
++  classifyException,
++  classifyStatus,
++  normalizeUrl,
++  validateChurn,
++  validateText,
++} from '../scripts/validate_readme.js';
++import { GaiError, PyTimeoutError, SSLError, URLError } from '../scripts/internal/errors.js';
++
++const VALID = `# List
++
++### Books
++
++- [A Book](https://example.com/book): A useful book.
++`;
++
++describe('ValidateReadmeTests', () => {
++  it('test_valid_resource', () => {
++    const { resources, errors, warnings } = validateText(VALID);
++    expect(resources.length).toBe(1);
++    expect(errors).toEqual([]);
++    expect(warnings).toEqual([]);
++  });
++
++  it('test_malformed_resource', () => {
++    const { errors } = validateText('### Books\n\n- [A Book](http://example.com): No TLS.\n');
++    expect(errors[0]).toContain('malformed resource entry');
++  });
++
++  it('test_duplicate_title_and_normalized_url', () => {
++    const text = `### Books
++
++- [A Book](https://EXAMPLE.com/book/): First entry.
++- [a book](https://example.com/book#section): Second entry.
++`;
++    const { errors } = validateText(text);
++    expect(errors.some((error) => error.includes('duplicate title'))).toBe(true);
++    expect(errors.some((error) => error.includes('duplicate URL'))).toBe(true);
++  });
++
++  it('test_empty_category', () => {
++    const { errors } = validateText('### Books\n\nSome prose.\n');
++    expect(errors[0]).toContain("category 'Books' has no resources");
++  });
++
++  it('test_level_two_heading_resets_category', () => {
++    const text = VALID + '\n## Contributing\n\n- [A Tool](https://example.com/tool): A tool.\n';
++    const { errors } = validateText(text);
++    expect(errors.some((error) => error.includes('outside a level-three category'))).toBe(true);
++  });
++
++  it('test_same_category_name_in_different_sections', () => {
++    const text = `## First
++
++### Tools
++
++## Second
++
++### Tools
++
++- [A Tool](https://example.com/tool): A tool.
++`;
++    const { errors } = validateText(text);
++    expect(errors.some((error) => error.includes("section 'First'"))).toBe(true);
++  });
++
++  it('test_description_needs_period', () => {
++    const { errors } = validateText(
++      '### Books\n\n- [A Book](https://example.com/book): Missing punctuation\n',
++    );
++    expect(errors[0]).toContain('description must end with a period');
++  });
++
++  it('test_normalize_url', () => {
++    expect(normalizeUrl('HTTPS://EXAMPLE.COM:443/path/?q=1#fragment')).toBe('https://example.com/path?q=1');
++  });
++
++  it('test_invalid_url_is_an_error', () => {
++    const { errors } = validateText(
++      '### Books\n\n- [A Book](https://example.com:bad/book): Invalid port.\n',
++    );
++    expect(errors[0]).toContain('invalid URL');
++  });
++
++  it('test_link_status_classification', () => {
++    expect(classifyStatus(404, 'https://example.com')?.[0]).toBe('error');
++    expect(classifyStatus(400, 'https://example.com')?.[0]).toBe('error');
++    expect(classifyStatus(451, 'https://example.com')?.[0]).toBe('error');
++    expect(classifyStatus(403, 'https://example.com')?.[0]).toBe('warning');
++    expect(classifyStatus(408, 'https://example.com')?.[0]).toBe('warning');
++    expect(classifyStatus(503, 'https://example.com')?.[0]).toBe('warning');
++    expect(classifyStatus(200, 'https://example.com')).toBeNull();
++  });
++
++  it('test_link_exception_classification', () => {
++    const url = 'https://example.invalid';
++    const dnsError = new URLError(new GaiError('not found'));
++    const tlsError = new URLError(new SSLError('bad certificate'));
++    const timeout = new URLError(new PyTimeoutError('timed out'));
++    expect(classifyException(dnsError, url)[0]).toBe('error');
++    expect(classifyException(tlsError, url)[0]).toBe('error');
++    expect(classifyException(timeout, url)[0]).toBe('warning');
++  });
++
++  it('test_churn_limits', () => {
++    let base = '## Learn\n\n### Books\n\n- [Book](https://example.com/book): A book.\n\n';
++    base += '## Build\n\n### Tools\n\n';
++    base += Array.from(
++      { length: 6 },
++      (_, index) => '- [Tool ' + index + '](https://example.com/' + index + '): A tool.',
++    ).join('\n');
++
++    // str.replace(old, new, 6) -- bounded to six replacements, like the Python.
++    const acceptable = replaceCount(base, 'A tool.', 'A better tool.', 6);
++    expect(validateChurn(base, acceptable)).toEqual([]);
++
++    const tooMany = acceptable + '\n- [Tool 7](https://example.com/7): A tool.\n';
++    expect(validateChurn(base, tooMany).some((error) => error.includes('resource entries'))).toBe(true);
++
++    const fourAdditions =
++      base +
++      '\n' +
++      Array.from(
++        { length: 4 },
++        (_, index) => '- [New ' + index + '](https://example.com/new-' + index + '): A tool.',
++      ).join('\n');
++    expect(validateChurn(base, fourAdditions).some((error) => error.includes('net entries'))).toBe(true);
++
++    let twoFoundations = base.replaceAll('A book.', 'A revised book.');
++    twoFoundations = twoFoundations.replaceAll(
++      '\n## Build',
++      '\n- [Second Book](https://example.com/book-2): A book.\n\n## Build',
++    );
++    expect(
++      validateChurn(base, twoFoundations).some((error) => error.includes('foundational entries')),
++    ).toBe(true);
++
++    let movedToFoundations = base.replaceAll('A book.', 'A revised book.');
++    movedToFoundations = movedToFoundations.replaceAll(
++      '\n## Build\n\n### Tools\n\n- [Tool 0](https://example.com/0): A tool.',
++      '\n- [Tool 0](https://example.com/0): A tool.\n\n## Build\n\n### Tools',
++    );
++    expect(
++      validateChurn(base, movedToFoundations).some((error) => error.includes('foundational entries')),
++    ).toBe(true);
++  });
++});
++
++/** `str.replace(old, new, count)` -- JavaScript has no count argument. */
++function replaceCount(text: string, from: string, to: string, count: number): string {
++  let out = '';
++  let rest = text;
++  for (let done = 0; done < count; done += 1) {
++    const at = rest.indexOf(from);
++    if (at < 0) break;
++    out += rest.slice(0, at) + to;
++    rest = rest.slice(at + from.length);
++  }
++  return out + rest;
++}

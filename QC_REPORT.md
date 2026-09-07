@@ -1,50 +1,152 @@
 # QC Report — `owainlewis/awesome-artificial-intelligence`, Python → TypeScript
 
-**Verdict: PASS** (qc_migration_kit 2, exit code 0).
-All 30 checks pass; the one SKIP is `PF05`, delegated to the compiler by design.
+**Verdict: PASS** — re-confirmed 2026-09-07 on the current harness
+(`QC_Migration` / `qcmig` 1.0.0, exit code 0): **32 PASS, 0 WARN, 0 FAIL, 2 SKIP**
+across 34 checks and all six gates. Both SKIPs are by design — `PF05` is delegated
+to the compiler, and `CV05` stands down because the two repos' implementation bodies
+are not comparable (see §2).
 
-Progression across three runs: **FAIL → WARN → PASS**.
+Progression across four runs: **FAIL → WARN → PASS → PASS (re-validated)**.
 
 | | |
 |---|---|
 | Source | `scraped_repos/Python/owainlewis_awesome-artificial-intelligence` @ `ab1c3cc` |
 | Migrated | `migrated_repo_TypeScript/owainlewis_awesome-artificial-intelligence` |
 | Languages | python → typescript |
-| Harness | `qc_migration_kit 2`, Docker backend (`python:3.13-slim`, `node:22-bookworm`) |
+| Harness | runs 1–3 `qc_migration_kit 2`; run 4 `QC_Migration` / `qcmig` 1.0.0. Docker backend throughout (`python:3.13-slim`, `node:22-bookworm`) |
 | Run 1 | 2026-08-25 11:22–11:37 UTC — **FAIL** (coverage gate; behaviour gate skipped) |
 | Run 2 | 2026-08-25 12:38–12:46 UTC — **WARN** (two heuristic warnings) |
 | Run 3 | 2026-08-25 13:11–13:20 UTC — **PASS** |
+| Run 4 | 2026-09-07 07:09:12–07:11:57 UTC — **PASS** on `qcmig` 1.0.0 (2m 45s) |
 
 ---
 
 ## 1. Final gate results
 
-| Gate | Run 1 | Run 2 | Run 3 |
-|---|---|---|---|
-| preflight | WARN | WARN | **PASS** |
-| build | PASS | PASS | **PASS** |
-| tests | PASS | PASS | **PASS** |
-| coverage | **FAIL** | PASS | **PASS** |
-| behavior | **SKIP** | PASS | **PASS** |
-| integrity | PASS | WARN | **PASS** |
-| **Overall** | **FAIL** | **WARN** | **PASS** |
+| Gate | Run 1 | Run 2 | Run 3 | Run 4 (`qcmig` 1.0.0) |
+|---|---|---|---|---|
+| preflight | WARN | WARN | **PASS** | **PASS** (7 PASS, 1 SKIP) |
+| build | PASS | PASS | **PASS** | **PASS** (5/5) |
+| tests | PASS | PASS | **PASS** | **PASS** (9/9) |
+| coverage | **FAIL** | PASS | **PASS** | **PASS** (5 PASS, 1 SKIP) |
+| behavior | **SKIP** | PASS | **PASS** | **PASS** (3/3) |
+| integrity | PASS | WARN | **PASS** | **PASS** (3/3) |
+| **Overall** | **FAIL** | **WARN** | **PASS** | **PASS** |
 
-| Metric | Run 1 | Run 3 |
-|---|---|---|
-| Line coverage | 52.40% | **92.91%** |
-| Branch coverage | 71.91% | **85.07%** |
-| Function coverage | 59.09% | **100%** |
-| Functions with zero coverage | **26 of 66** | **0 of 72** |
-| Tests | 12 | **114** (12 p2p + 102 new, 0 dropped) |
-| Behaviour fixtures | 0 (gate skipped) | **34/34 agree** |
-| Assertion density ratio | 1.00 | 0.87 (floor 0.70) |
-| Target-language dominance | 91.98% | **96.6%** |
-| CLI invocation classes matching Python | 25 of 28 | **35 of 35** |
-| Library parity cases | 134/134 | **134/134** |
+| Metric | Run 1 | Run 3 | Run 4 |
+|---|---|---|---|
+| Line coverage | 52.40% | 92.91% | **92.91%** |
+| Branch coverage | 71.91% | 85.07% | **85.07%** |
+| Function coverage | 59.09% | 100% | **100%** |
+| Functions with zero coverage | **26 of 66** | 0 of 72 | **0 of 72** |
+| Tests | 12 | 114 | **114** (12 p2p + 102 new, 0 dropped) |
+| Declared test functions | — | 82 | **82** in 6 files vs source 12 in 1 |
+| Behaviour fixtures | 0 (gate skipped) | 34/34 agree | **34/34 agree** |
+| Assertion density ratio | 1.00 | 0.87 | **0.87** (161/82 = 1.96 vs source 2.25; floor 0.70) |
+| Target-language dominance | 91.98% | 96.6% | **96.6%** |
+| Implementation LOC (migrated / source) | — | 1724 / 286 | **1724 / 286** (ratio 6.03) |
+| CLI invocation classes matching Python | 25 of 28 | 35 of 35 | **35 of 35** |
+| Library parity cases | 134/134 | 134/134 | **134/134** |
+
+Every headline number reproduced exactly against run 3 — the migration is stable under a
+harness it was not tuned against.
 
 ---
 
-## 2. What was actually wrong
+## 2. Run 4 — re-validation on the current harness (`qcmig` 1.0.0)
+
+Runs 1–3 used `qc_migration_kit 2`. Run 4 re-ran the same migration against the harness
+now in `QC_Migration/` (`qcmig` 1.0.0), which carries the same check IDs with several of
+them tightened (§2.2). It emitted **34 checks** where the run-3 report recorded 30.
+Command:
+
+```bash
+uv run ./QC_Migration/qc_migration.py \
+  --source   ./code_migrations_task/scraped_repos/Python/owainlewis_awesome-artificial-intelligence \
+  --migrated ./code_migrations_task/migrated_repo_TypeScript/owainlewis_awesome-artificial-intelligence \
+  --source-lang python --target-lang typescript \
+  --out ./code_migrations_task/qc_reports --cache-dir ~/.cache/qcmig
+```
+
+Exit code **0**. Full machine output:
+`code_migrations_task/qc_reports/qc_owainlewis_awesome-artificial-intelligence_python_to_typescript.{md,json}`.
+
+### 2.1 Every check, run 4
+
+| Gate | Checks | Result |
+|---|---|---|
+| preflight | `PF01` `PF02` `PF03` `PF04` `PF06` `PF07` `PF08` | PASS |
+| preflight | `PF05` | **SKIP** — parsing delegated to the compiler in the build gate |
+| build | `BD00` `BD01` `BD01A` `BD02` `BD03` | PASS (all exit code 0) |
+| tests | `TS01` `TS02` `TS03` `TS04` `TS05` `TS06` `TS07` `TS08` `TS09` | PASS |
+| coverage | `CV01` `CV02` `CV03` `CV04` `CV06` | PASS |
+| coverage | `CV05` | **SKIP** — see §2.3 |
+| behavior | `BH01` `BH02` `BH03` | PASS |
+| integrity | `IN01` `IN02` `IN03` | PASS |
+
+### 2.2 What actually differs between the two kits
+
+Both kits expose the **same set of check IDs** — diffing the two `qcmig` trees shows no
+ID added or removed. What changed is the *semantics* of several checks, and `qcmig` 1.0.0
+emitted **34 checks** here where the run-3 report recorded 30. The run-3 JSON no longer
+exists, so which four were previously suppressed cannot be stated from evidence; the
+claim here is only what run 4 itself emitted.
+
+The substantive tightening, read from the source diff:
+
+| Check | `qc_migration_kit 2` | `qcmig` 1.0.0 |
+|---|---|---|
+| `CV05` | always subtracted the two line-coverage percentages | **SKIPs** when the implementation-LOC ratio exceeds 4.00 — see §2.3 |
+| `CV01` / `CV06` | a missing coverage report was always a blocker | distinguishes *"the toolchain defines no coverage recipe"* (SKIP) from *"a recipe ran and wrote nothing"* (BLOCKED) |
+| `TS08` | a source report parsing to **zero tests** passed | **BLOCKED** — an empty baseline is the same uncertifiable condition as no baseline, and previously let a source that never ran a test certify a migration |
+| `TS03` / `TS04` | keyed on "no parsable report" | keyed on *credibility* — no report **or** a report holding zero tests |
+
+None of these changes is favourable to this migration; the `TS08` and `CV05` changes are
+both strictly stricter. It passed anyway.
+
+The checks doing the real load-bearing work on the baseline side:
+
+| ID | What it asks | Result |
+|---|---|---|
+| `BD01A` | does the **source** repo build, so the p2p baseline is trustworthy? | PASS — exit 0 under `python:3.13-slim` |
+| `TS08` | is the source suite green, under the new zero-test rule? | PASS — 12/12 source tests pass |
+| `TS09` | did the source baseline actually *run* what it declares? | PASS — 12 of 12 declared source tests ran (ratio 1.00, floor 0.80) |
+| `TS07` | did declared test-function count shrink? | PASS — 82 declared across 6 migrated files vs 12 in 1 source file (ratio 6.83, floor 1.00) |
+
+`TS09` matters more than its wording suggests: a partial source baseline would mean a
+dropped test could hide in the untested remainder, and `TS03`'s "0 dropped" would be
+worth less than it looks. At ratio 1.00 the whole declared source suite ran, so `TS03`
+reconciles against the complete list.
+
+### 2.3 `CV05` moved from PASS to SKIP — and that is the correct reading
+
+The old kit's `CV05` subtracted the two line-coverage percentages unconditionally
+(source 71.43% vs migrated 92.91%, a 21.48pp *improvement*, comfortably inside the 10pp
+drop allowance). `qcmig` 1.0.0 refuses that subtraction and reports:
+
+> source 71.43% and migrated 92.91% are measured over incomparable bodies of code
+> (implementation LOC ratio 6.03, above 4.00 — see `PF06`); subtracting the two
+> percentages would not describe a regression. `CV02` still holds the migration to its
+> absolute floor.
+
+The new harness is right. As §5 records, the port is 1724 implementation LOC against the
+source's 286 precisely because it hand-ports `urlsplit`, `urlopen`, `ipaddress` and a
+slice of `str`. The two percentages are measured over different denominators, and the
+old comparison flattered the migration rather than testing it. The absolute floors
+(`CV02` 92.91% ≥ 70%, `CV03` 85.07% ≥ 55%, `CV04` 100% ≥ 70%) and `CV06`
+(0 of 72 functions untested) carry the gate on their own.
+
+### 2.4 Nothing regressed
+
+No source file was edited for run 4 — the tree audited is the one run 3 certified, and
+every metric reproduced exactly (coverage to two decimals, 114/114 tests, 34/34 fixtures,
+0 dropped, 0 dead functions, dominance 96.6%). The two structural corrections from §4
+also held under the newer `PF04` and `IN03`: no Python remains, and no returned literal
+is flagged.
+
+---
+
+## 3. What was actually wrong
 
 The library was migrated to a very high standard and never broke: 134 adversarial
 differential cases passed before any change and still pass. **Every defect was in the CLI
@@ -103,7 +205,7 @@ paths now share one `universalNewlines()` helper.
 
 ---
 
-## 3. The two structural corrections that cleared run 2's warnings
+## 4. The two structural corrections that cleared run 2's warnings
 
 Run 2 left two warnings. Both were heuristic false positives *about the checks*, but each
 pointed at something genuinely misplaced. I fixed the placement rather than the checker.
@@ -146,7 +248,7 @@ This also lifted target-language dominance from 91.98% to 96.6%.
 
 ---
 
-## 4. Coverage: 26 dead functions → zero
+## 5. Coverage: 26 dead functions → zero
 
 The port is ~1724 implementation LOC against the source's 286, because it hand-ports
 `urlsplit`, `urlopen`, `ipaddress` and a slice of `str` to preserve behaviour. The
@@ -183,7 +285,7 @@ faithful mirror. Everything new lives in separate files.
 
 ---
 
-## 5. Assertion density — raised honestly, not padded
+## 6. Assertion density — raised honestly, not padded
 
 Run 2 passed `IN01` at ratio **0.739** against a 0.70 floor. Thin, and thinner *because*
 tests were added: the new tests are numerous and narrow where the Python suite packs
@@ -209,7 +311,7 @@ thresholds to make a check go green"*; the same applies to the numerator.
 
 ---
 
-## 6. Independent verification
+## 7. Independent verification
 
 Not taken on trust — each of these was executed, and re-executed after the final edit.
 
@@ -227,18 +329,19 @@ Not taken on trust — each of these was executed, and re-executed after the fin
 | Curated list vs committed blobs at `ab1c3cc` | **README.md and all carried files IDENTICAL** |
 | Python files remaining in the migrated repo | **0** |
 | Compiled `dist/scripts/validate_readme.js` (Docker entrypoint) | runs; fixed exit codes hold |
+| Full re-run on `qcmig` 1.0.0, 2026-09-07 | **exit 0**; 32 PASS / 0 WARN / 0 FAIL / 2 SKIP |
 
 All three patches were regenerated after the final source edit and re-verified.
 `MIGRATION.md` remains deliberately outside them, as in the original delivery.
 
 ---
 
-## 7. Documentation corrected
+## 8. Documentation corrected
 
 `MIGRATION.md` claimed the parser was "byte-identical" apart from `prog`, and that there
 were exactly two deliberate differences. Both were untrue. It now carries a **"Corrected
 after QC"** section documenting all five divergences with reasoning, retracts the coverage
-argument quoted in §4, and records why `reference_probe.py` lives in the source repo.
+argument quoted in §5, and records why `reference_probe.py` lives in the source repo.
 
 `instructions.md`, `truth.md` and `QC_REPORT.md` are in `.gitignore` and `.dockerignore` —
 harness artefacts, already absent from `golden.patch`, now also out of `git add -A` and
@@ -246,7 +349,7 @@ the Docker build context.
 
 ---
 
-## 8. Honest limits of this PASS
+## 9. Honest limits of this PASS
 
 A green board is not proof of equivalence. What it does and does not cover:
 
@@ -262,7 +365,7 @@ A green board is not proof of equivalence. What it does and does not cover:
 
 3. **F5 has no fixture.** Reproducing it needs a base revision whose README contains
    `CR CR LF`, which is not expressible as a CLI invocation. It is covered by the shared
-   `universalNewlines()` helper and by the measurement in §2.
+   `universalNewlines()` helper and by the measurement in §3.
 
 4. **`qc_fixtures.json` was added to the *source* repository**, which is where the kit
    reads it from and only from there. It is additive and contains no code, but it does
@@ -270,18 +373,24 @@ A green board is not proof of equivalence. What it does and does not cover:
    pristine fixture — at the cost of the behaviour gate skipping again.
    `tools/reference_probe.py` was likewise moved into the source repo.
 
-5. **The kit still cannot run on Windows unmodified.** `qcmig/runner.py:200` calls
-   `os.getuid()`/`os.getgid()`, which do not exist on Windows, and dies with a bare
-   `AttributeError` before any gate runs — not the documented exit code 2. All three runs
-   went through a wrapper supplying `0` for both. Those values feed only
-   `qcmig/session.py:97`'s `chown -R`, a no-op on an NTFS bind mount, so the shim is
-   behaviour-neutral. **No kit file was edited.** Suggested upstream fix:
-   `getattr(os, 'getuid', lambda: 0)()`.
+5. **The kit still cannot run on Windows unmodified — including `qcmig` 1.0.0.**
+   `qcmig/runner.py:200` still calls `os.getuid()`/`os.getgid()`, which do not exist on
+   Windows, and dies with a bare `AttributeError` before any gate runs — not the
+   documented exit code 2. Runs 1–3 went through a wrapper supplying `0` for both; run 4
+   ran on macOS and needed no shim, so the defect is untouched rather than fixed. Those
+   values feed only `qcmig/session.py`'s `chown -R`, a no-op on an NTFS bind mount, so
+   the shim was behaviour-neutral. **No kit file was edited in any run.** Suggested
+   upstream fix: `getattr(os, 'getuid', lambda: 0)()`.
 
 6. **Entry-point auto-detection missed an obvious CLI on both sides**, silently
    downgrading the behaviour gate to SKIP in run 1. A skipped behaviour gate arguably
    deserves a WARN in the summary rather than a silent SKIP — as shipped, a migration with
-   real CLI defects can read as fully green.
+   real CLI defects can read as fully green. `qcmig` 1.0.0 behaves the same way; run 4
+   only avoided it because `qc_fixtures.json` is now in the source repo (limit 4).
+
+7. **Run 4 is a re-audit, not a fresh review.** It re-ran the tree run 3 certified against
+   a tightened check set and found nothing new. It does not revisit limits 1–3 above, which
+   are properties of the migration and the fixtures rather than of the harness.
 
 > **Note on the source fixture.** Its `.git` is gutted — only `objects/pack` survives, with
 > no `HEAD`, refs or index — so `git -C <source>` fails, and any reviewer diffing the
@@ -290,7 +399,7 @@ A green board is not proof of equivalence. What it does and does not cover:
 
 ---
 
-## 9. Bottom line
+## 10. Bottom line
 
 The library was never the problem. The program around it was broken in five places, all
 inside the one file with no test coverage, in a submission that explicitly claimed that
@@ -302,4 +411,5 @@ behaviour gate that could have articulated it never ran. Both now run, and both 
 along with the 28-case CLI differential and the 134-case library differential that sit
 outside the kit entirely.
 
-*Run 1 and first report 2026-08-25. Revised after run 2, and again after run 3 — same day.*
+*Run 1 and first report 2026-08-25; revised after run 2 and run 3 the same day.*
+*Run 4 re-validated the unchanged tree on `QC_Migration` / `qcmig` 1.0.0 on 2026-09-07 — PASS, 32/34 checks, 2 by-design SKIPs.*
